@@ -8,10 +8,10 @@ import java.util.Optional;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.mongodb.core.MongoOperations;
 import org.springframework.data.mongodb.core.aggregation.Aggregation;
+import org.springframework.data.mongodb.core.aggregation.AggregationOptions;
 import org.springframework.data.mongodb.core.aggregation.AggregationResults;
 import org.springframework.data.mongodb.core.aggregation.MatchOperation;
 import org.springframework.data.mongodb.core.aggregation.ProjectionOperation;
@@ -25,8 +25,6 @@ import com.snaplogic.runtime.dtos.PmPipelineRtItem;
 import com.snaplogic.runtime.dtos.SearchItem;
 import com.snaplogic.runtime.repositories.SearchRepository;
 import com.snaplogic.runtime.utils.DateUtils;
-
-import lombok.extern.log4j.Log4j2;
 
 
 /**
@@ -44,7 +42,6 @@ public class RuntimePipelineController {
 	
 	@Autowired
 	private SearchRepository searchRepo;
-	//private PmPipelineRtRepository runtimeRepo;
 
 	/**
 	 * (U) This method is used to build the projection used by the queries.
@@ -102,12 +99,14 @@ public class RuntimePipelineController {
 	
 			MatchOperation match = new MatchOperation(
 					new Criteria().andOperator(orgSnodeIdCriteria, dateRangeCriteria, searchCriteria));
-			    
 			
-			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection());
+			AggregationOptions aggOps = AggregationOptions.builder().readPreference(
+					com.mongodb.ReadPreference.secondaryPreferred()).build();
+			
+			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection()).withOptions(aggOps);
 			
 			logger.info("Running Improved Query: " + agg.toString());
-			
+									
 			AggregationResults<PmPipelineRtItem> results = mongoOperations.aggregate(agg, 
 					"pm.pipeline_rt", PmPipelineRtItem.class);
 									
@@ -168,12 +167,14 @@ public class RuntimePipelineController {
 
 			MatchOperation match = new MatchOperation(
 					new Criteria().andOperator(orgSnodeIdCriteria, dateRangeCriteria, regexSearchCriteria));
-			        
+
+			AggregationOptions aggOps = AggregationOptions.builder().readPreference(
+					com.mongodb.ReadPreference.secondaryPreferred()).build();
 			
-			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection());
-			
+			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection()).withOptions(aggOps);
+						
 			logger.info("Orginal query: " + agg.toString());
-			
+						
 			AggregationResults<PmPipelineRtItem> results = mongoOperations.aggregate(agg, 
 					"pm.pipeline_rt", PmPipelineRtItem.class);
 									
@@ -252,7 +253,10 @@ public class RuntimePipelineController {
 			
 			MatchOperation match = new MatchOperation(Criteria.where("_id").is(id));
 	        
-			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection());
+			AggregationOptions aggOps = AggregationOptions.builder().readPreference(
+					com.mongodb.ReadPreference.secondaryPreferred()).build();
+			
+			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection()).withOptions(aggOps);
 			
 			AggregationResults<PmPipelineRtItem> results = mongoOperations.aggregate(agg, 
 					"pm.pipeline_rt", PmPipelineRtItem.class);
