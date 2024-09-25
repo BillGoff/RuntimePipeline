@@ -1,0 +1,10 @@
+package com.snaplogic.runtime.repositories;
+
+import com.snaplogic.runtime.dtos.RuntimeItem;
+
+import java.util.Optional;
+@
+public interface RuntimeRepositoryCustom{
+	
+	public Optional<RuntimeItem> findById(String id);
+}
