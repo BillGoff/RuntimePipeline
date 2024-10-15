@@ -2,17 +2,20 @@ package com.snaplogic.runtime.controllers;
 
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.mongodb.core.MongoOperations;
 import org.springframework.data.mongodb.core.aggregation.Aggregation;
-import org.springframework.data.mongodb.core.aggregation.AggregationOptions;
 import org.springframework.data.mongodb.core.aggregation.AggregationResults;
+import org.springframework.data.mongodb.core.aggregation.LimitOperation;
 import org.springframework.data.mongodb.core.aggregation.MatchOperation;
 import org.springframework.data.mongodb.core.aggregation.ProjectionOperation;
 import org.springframework.data.mongodb.core.query.Criteria;
@@ -37,11 +40,15 @@ public class RuntimePipelineController {
 
 	private static final Logger logger = LogManager.getLogger(RuntimePipelineController.class);
 	
+    private ExecutorService executorService = Executors.newFixedThreadPool(10); // Create a thread pool with 10 threads
+
+	
 	@Autowired
 	private MongoOperations mongoOperations;
 	
 	@Autowired
 	private SearchRepository searchRepo;
+	//private PmPipelineRtRepository runtimeRepo;
 
 	/**
 	 * (U) This method is used to build the projection used by the queries.
@@ -59,16 +66,35 @@ public class RuntimePipelineController {
 	}
 	
 	/**
+	 * This method is used to build the date range criteria.
+	 * @return Criteria, the date range criteria
+	 */
+	private Criteria buildDateRangeCriteria()
+	{
+		//Create a date to 23 Sept 2023.
+		LocalDate ldStart = LocalDate.of(2023, 9, 23);
+		//Create a date to 24 Sept 2024.
+		LocalDate ldEnd = LocalDate.of(2024, 9, 24);
+		
+		Criteria dateRangeCriteria = Criteria.where("create_time").gte(ldStart).lte(ldEnd);
+
+		return dateRangeCriteria;
+	}
+	
+	/**
 	 * This method is used to run the two queries.  First query will do the regex against the search collection, and 
 	 * return all values that match it.  The second query will do a concrete lookup with the orgSnodeId and those values,
 	 * along with the default date.
 	 * 
 	 * @param orgSnodeId String value of the org snode id to use for the query.
 	 * @param search String value to use for the regex query against the search collection.
+	 * @param projectSnodes list of Strings that are the project_snode_ids to include in the query.
+	 * @param states list of strings that are the states to include in the query.
 	 * @return List of PmPipelineRtItems that match the queries.
 	 * @throws Exception in the event either query fails.
 	 */
-	private List<PmPipelineRtItem> runImprovedDashbardQuery(String orgSnodeId, String search) throws Exception
+	private List<PmPipelineRtItem> runImprovedDashbardQuery(String orgSnodeId, String search, 
+			String projectSnodesString, String statesString) throws Exception
 	{
 		Date startDate = DateUtils.rightNowDate();
 		boolean failed = false;
@@ -76,37 +102,44 @@ public class RuntimePipelineController {
 		List<PmPipelineRtItem> pipelineResults = new ArrayList<PmPipelineRtItem>();
 		
 		try
-		{			
-			List<SearchItem> items = searchRepo.findByIdRegex(search);
-		
-			logger.debug("It took " + DateUtils.computeDiff(startDate,
-					DateUtils.rightNowDate()) + " to do the regex lookup (<" + search + ">!");
+		{	
+			List<Criteria> queryCriteria = new ArrayList<Criteria>();
 			
-			List<String> searchValues = new ArrayList<>();
-	
-			for(SearchItem item: items)
-				searchValues.add(item.getId());
+			queryCriteria.add(Criteria.where("org_snode_id").is(orgSnodeId));
+			queryCriteria.add(buildDateRangeCriteria());
 			
-			Criteria searchCriteria = Criteria.where("search").in(searchValues);
+			LimitOperation limitOp = new LimitOperation(100);
+						
+			if ((projectSnodesString != null) && (projectSnodesString.trim().length() > 0))
+			{
+				queryCriteria.add(Criteria.where("project_snode_id").in(Arrays.asList(projectSnodesString.split(","))));
+			}
+			if ((statesString != null) && (statesString.trim().length() > 0))
+			{
+				queryCriteria.add(Criteria.where("state").in(Arrays.asList(statesString.split(","))));
+			}
 
-			//Create a date to 9 Sept 2023.
-			LocalDate ldStart = LocalDate.of(2023, 9, 9);
-			//Create a date to 19 Sept 2024.
-			LocalDate ldEnd = LocalDate.of(2024, 9, 19);
+			if ((search != null) && (search.length() > 0))
+			{
+				List<SearchItem> items = searchRepo.findByIdRegex(search);
+		
+				logger.debug("It took " + DateUtils.computeDiff(startDate,
+						DateUtils.rightNowDate()) + " to do the regex lookup (<" + search + ">!");
 			
-			Criteria orgSnodeIdCriteria = Criteria.where("org_snode_id").is(orgSnodeId);
-			Criteria dateRangeCriteria = Criteria.where("create_time").gte(ldStart).lte(ldEnd);
+				List<String> searchValues = new ArrayList<>();
 	
-			MatchOperation match = new MatchOperation(
-					new Criteria().andOperator(orgSnodeIdCriteria, dateRangeCriteria, searchCriteria));
+				for(SearchItem item: items)
+					searchValues.add(item.getId());
+
+				queryCriteria.add(Criteria.where("search").in(searchValues));
+			}
 			
-			AggregationOptions aggOps = AggregationOptions.builder().readPreference(
-					com.mongodb.ReadPreference.secondaryPreferred()).build();
+			MatchOperation match = new MatchOperation(new Criteria().andOperator(queryCriteria));
 			
-			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection()).withOptions(aggOps);
+			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection(), limitOp);
 			
 			logger.info("Running Improved Query: " + agg.toString());
-									
+			
 			AggregationResults<PmPipelineRtItem> results = mongoOperations.aggregate(agg, 
 					"pm.pipeline_rt", PmPipelineRtItem.class);
 									
@@ -115,9 +148,8 @@ public class RuntimePipelineController {
 		catch(Exception e)
 		{
 			failed = true;
-			System.out.println("Something bad happened!");
-			
-			e.printStackTrace();
+			logger.error("Failed to run the new imporved query/index!", e);
+			throw e;
 		}
 		finally
 		{
@@ -129,9 +161,9 @@ public class RuntimePipelineController {
 				msg.append(" to successfully ");
 	
 			
-			msg.append("lookup RunTime by its Id and concrete search values.");
+			msg.append("lookup RunTime using the new query/index.");
 	
-			System.out.println(msg.toString());
+			logger.info(msg.toString());
 		}
 		return (pipelineResults);
 	}
@@ -141,10 +173,13 @@ public class RuntimePipelineController {
 	 * 
 	 * @param orgSnodeId String value of the org snode id to use for the query.
 	 * @param search String value that we will use the regex on.
+	 * @param projectSnodesString a comma separated value of projectSnodeIds.
+	 * @param statesString a comma separated value of states.
 	 * @return List of PmPipelineRtItems that match the query.
 	 * @throws Exception in the event the query fails.
 	 */
-	private List<PmPipelineRtItem> runRegexDashboardQuery(String orgSnodeId, String search) throws Exception
+	private List<PmPipelineRtItem> runRegexDashboardQuery(String orgSnodeId, String search, String projectSnodesString,
+			String statesString) throws Exception
 	{
 		Date startDate = DateUtils.rightNowDate();
 		boolean failed = false;
@@ -156,25 +191,29 @@ public class RuntimePipelineController {
 //			boolean exists = mongoOperations.collectionExists("pm.pipeline_rt");
 //			System.out.println("exists: " + exists);
 			
-			//Create a date to 9 Sept 2023.
-			LocalDate ldStart = LocalDate.of(2023, 9, 9);
-			//Create a date to 19 Sept 2024.
-			LocalDate ldEnd = LocalDate.of(2024, 9, 19);
-			
-			Criteria orgSnodeIdCriteria = Criteria.where("org_snode_id").is(orgSnodeId);
-			Criteria dateRangeCriteria = Criteria.where("create_time").gte(ldStart).lte(ldEnd);
-			Criteria regexSearchCriteria = Criteria.where("search").regex(search);
+			List<Criteria> queryCriteria = new ArrayList<Criteria>();
 
-			MatchOperation match = new MatchOperation(
-					new Criteria().andOperator(orgSnodeIdCriteria, dateRangeCriteria, regexSearchCriteria));
-
-			AggregationOptions aggOps = AggregationOptions.builder().readPreference(
-					com.mongodb.ReadPreference.secondaryPreferred()).build();
+			queryCriteria.add(Criteria.where("org_snode_id").is(orgSnodeId));
+			queryCriteria.add(buildDateRangeCriteria());
 			
-			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection()).withOptions(aggOps);
-						
+			
+			LimitOperation limitOp = new LimitOperation(100);
+			
+			if ((projectSnodesString != null) && (!projectSnodesString.isEmpty()))
+				queryCriteria.add(Criteria.where("project_snode_id").in(projectSnodesString));
+
+			if ((statesString != null) && (!statesString.isEmpty()))
+				queryCriteria.add(Criteria.where("state").in(statesString));
+			
+			if((search != null) && (search.length() > 0))
+				queryCriteria.add(Criteria.where("search").regex(search));
+			
+			MatchOperation match = new MatchOperation(new Criteria().andOperator(queryCriteria));
+
+			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection(), limitOp);
+			
 			logger.info("Orginal query: " + agg.toString());
-						
+			
 			AggregationResults<PmPipelineRtItem> results = mongoOperations.aggregate(agg, 
 					"pm.pipeline_rt", PmPipelineRtItem.class);
 									
@@ -182,6 +221,7 @@ public class RuntimePipelineController {
 		}
 		catch(Exception e)
 		{
+			logger.error("Failed to run the original query/index!", e);
 			throw e;
 		}
 		finally
@@ -193,7 +233,7 @@ public class RuntimePipelineController {
 			else
 				msg.append(" to successfully ");
 
-			msg.append("lookup RunTime by its Id and regex of Search");
+			msg.append("lookup RunTime using the original query.");
 
 			logger.info(msg.toString());
 		}
@@ -204,30 +244,43 @@ public class RuntimePipelineController {
 	 *  This end point is used to run the dashboard query.
 	 * 
 	 * @param orgSnodeId String value of the Org Snode Id to use in the query.
+	 * @param projectSnodeIdes a comma separated value of projectSnodeIds.
+	 * @param states a comma separated value of states.
 	 * @param search String value of the regex to apply to the search part of the query.
 	 * @return String the json of the results returned.
 	 */
 	@GetMapping(path = "/runtime/dashboard", produces = MediaType.APPLICATION_JSON_VALUE)
 	public List<PmPipelineRtItem> runtimeDashboard(@RequestParam("orgSnodeId") String orgSnodeId, 
-			@RequestParam("search") String search)
+			@RequestParam(required = false, name = "projectSnodeIds") String projectSnodeIds,
+			@RequestParam(required = false, name = "states") String statesString,
+			@RequestParam(required = false, name = "search") String search)
 	{
-		logger.debug("Attempting to lookup <" + orgSnodeId + ">");
-
-		List<PmPipelineRtItem> results = new ArrayList<PmPipelineRtItem>();
+		logger.debug("Attempting to lookup orgSnodeId: <" + orgSnodeId + ">");
+		
+		List<PmPipelineRtItem> results1 = new ArrayList<PmPipelineRtItem>();
 		try
 		{
-			results = runRegexDashboardQuery(orgSnodeId, search);
+			executorService.submit(() -> {
+				try {
+					List<PmPipelineRtItem> results = runRegexDashboardQuery(orgSnodeId, search, 
+							projectSnodeIds, statesString);
+					logger.debug("results size: " + results.size());
+				}
+				catch(Exception e)
+				{
+					logger.error("Original regex Dashboard query failed!", e);
+				}
+			});
 			
-			List<PmPipelineRtItem> results1 = runImprovedDashbardQuery(orgSnodeId, search);
+			results1 = runImprovedDashbardQuery(orgSnodeId, search, projectSnodeIds, statesString);
 			
-			logger.debug("results size: " + results.size());
 			logger.debug("results1 size: " + results1.size());
 		}
 		catch(Exception e)
 		{
 			logger.error("Unable to run dashboard lookup!:", e);
 		}
-		return (results);
+		return (results1);
 	}
 	
 	/**
@@ -253,10 +306,7 @@ public class RuntimePipelineController {
 			
 			MatchOperation match = new MatchOperation(Criteria.where("_id").is(id));
 	        
-			AggregationOptions aggOps = AggregationOptions.builder().readPreference(
-					com.mongodb.ReadPreference.secondaryPreferred()).build();
-			
-			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection()).withOptions(aggOps);
+			Aggregation agg = Aggregation.newAggregation(match, buildRuntimeProjection());
 			
 			AggregationResults<PmPipelineRtItem> results = mongoOperations.aggregate(agg, 
 					"pm.pipeline_rt", PmPipelineRtItem.class);
